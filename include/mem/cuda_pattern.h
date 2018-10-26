@@ -34,7 +34,11 @@ namespace mem
         size_t size_ {0};
 
     public:
-        device_data(const byte* host_data, size_t size);
+        explicit device_data(const byte* host_data, size_t size);
+
+        device_data(const device_data&) = delete;
+        device_data(device_data&& rhs);
+
         ~device_data();
 
         const byte* data() const;
@@ -50,10 +54,14 @@ namespace mem
         size_t trimmed_size_ {0};
 
     public:
-        cuda_pattern(const pattern& pattern);
+        explicit cuda_pattern(const pattern& pattern);
+
+        cuda_pattern(const cuda_pattern&) = delete;
+        cuda_pattern(cuda_pattern&& rhs);
+
         ~cuda_pattern();
 
-        std::vector<size_t> scan_all(const device_data& data, size_t max_results = 1024);
+        std::vector<size_t> scan_all(const device_data& data, size_t max_results = 1024) const;
     };
 }
 

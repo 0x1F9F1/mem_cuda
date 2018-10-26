@@ -17,9 +17,23 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-#include <mem/cuda_pattern.h>
+#include "mem/cuda_pattern.h"
+#include <memory>
 
-#define check(ans) (ans)
+#include <stdexcept>
+
+#define check(ans) do { assert_((ans), __FILE__, __LINE__); } while (false)
+inline void assert_(cudaError_t code, const char *file, int line)
+{
+    if (code != cudaSuccess)
+    {
+        char buffer[1024];
+
+        snprintf(buffer, 1024, "CUDA Check Failed: %s : %s : %i", cudaGetErrorString(code), file, line);
+
+        throw std::runtime_error(buffer);
+    }
+}
 
 namespace cuda
 {
@@ -91,24 +105,25 @@ namespace mem
         }
 
         __global__ void scan_kernel(
-            const mem::byte* data,
+            const byte* data,
             size_t data_length,
-            const mem::byte* bytes,
-            const mem::byte* masks,
+            const byte* bytes,
+            const byte* masks,
             size_t pattern_length,
             size_t* results,
             size_t* results_count,
             size_t max_results)
         {
-            size_t total_threads    = blockDim.x * gridDim.x;
+            size_t thread_index  = blockIdx.x * blockDim.x + threadIdx.x;
+            size_t total_threads = blockDim.x * gridDim.x;
+
             size_t bytes_per_thread = (data_length + total_threads - 1) / total_threads;
 
-            size_t thread_index     = blockIdx.x * blockDim.x + threadIdx.x;
             size_t start_index      = thread_index * bytes_per_thread;
             size_t end_index        = min(start_index + bytes_per_thread, data_length);
 
-            const mem::byte*       current = data + start_index;
-            const mem::byte* const end     = data + end_index;
+            const byte*       current = data + start_index;
+            const byte* const end     = data + end_index;
 
             const size_t last = pattern_length - 1;
 
@@ -143,9 +158,20 @@ namespace mem
         cuda::host_to_device<byte>(host_data, device_data_, size_);
     }
 
+    device_data::device_data(device_data&& rhs)
+        : device_data_(rhs.device_data_)
+        , size_(rhs.size_)
+    {
+        rhs.device_data_ = nullptr;
+        rhs.size_ = 0;
+    }
+
     device_data::~device_data()
     {
-        cuda::device_allocator<byte>{}.deallocate(device_data_, size_);
+        if (device_data_)
+        {
+            cuda::device_allocator<byte>{}.deallocate(device_data_, size_);
+        }
     }
 
     const byte* device_data::data() const
@@ -159,23 +185,47 @@ namespace mem
     }
 
     cuda_pattern::cuda_pattern(const pattern& pattern)
-        : size_(pattern.size())
+        : device_bytes_(cuda::device_allocator<byte>{}.allocate(pattern.size()))
+        , device_masks_(cuda::device_allocator<byte>{}.allocate(pattern.size()))
+        , size_(pattern.size())
         , trimmed_size_(pattern.trimmed_size())
-        , device_bytes_(cuda::device_allocator<byte>{}.allocate(size_))
-        , device_masks_(cuda::device_allocator<byte>{}.allocate(size_))
     {
         cuda::host_to_device<byte>(pattern.bytes(), device_bytes_, size_);
         cuda::host_to_device<byte>(pattern.masks(), device_masks_, size_);
     }
 
-    cuda_pattern::~cuda_pattern()
+    cuda_pattern::cuda_pattern(cuda_pattern&& rhs)
+        : device_bytes_(rhs.device_bytes_)
+        , device_masks_(rhs.device_masks_)
+        , size_(rhs.size_)
+        , trimmed_size_(rhs.trimmed_size_)
     {
-        cuda::device_allocator<byte>{}.deallocate(device_bytes_, size_);
-        cuda::device_allocator<byte>{}.deallocate(device_masks_, size_);
+        rhs.device_bytes_ = nullptr;
+        rhs.device_masks_ = nullptr;
+        rhs.size_ = 0;
+        rhs.trimmed_size_ = 0;
     }
 
-    std::vector<size_t> cuda_pattern::scan_all(const device_data& data, size_t max_results)
+    cuda_pattern::~cuda_pattern()
     {
+        if (device_bytes_)
+        {
+            cuda::device_allocator<byte>{}.deallocate(device_bytes_, size_);
+        }
+
+        if (device_masks_)
+        {
+            cuda::device_allocator<byte>{}.deallocate(device_masks_, size_);
+        }
+    }
+
+    std::vector<size_t> cuda_pattern::scan_all(const device_data& data, size_t max_results) const
+    {
+        if ((data.size() < size_) || (trimmed_size_ == 0))
+        {
+            return {};
+        }
+
         size_t scan_length = (data.size() - size_) + 1;
 
         cudaDeviceProp deviceProp;
@@ -204,6 +254,9 @@ namespace mem
         std::vector<size_t> results(min(result_count, max_results));
 
         cuda::device_to_host<size_t>(device_results, results.data(), results.size());
+
+        cuda::device_allocator<size_t>{}.deallocate(device_results, max_results);
+        cuda::device_allocator<size_t>{}.deallocate(device_result_count, 1);
 
         return results;
     }
