@@ -22,6 +22,7 @@
 
 #include <mem/pattern.h>
 #include <vector>
+#include <memory>
 
 namespace mem
 {
@@ -37,14 +38,21 @@ namespace mem
         cuda_runtime(const cuda_runtime&) = delete;
         cuda_runtime(cuda_runtime&&) = delete;
 
+        void force_init();
         void set_device();
+
+        int get_id() const
+        {
+            return device_;
+        }
     };
 
     class cuda_device_data
     {
     private:
-        void* data_ {nullptr};
-        size_t size_ {0};
+        class impl;
+
+        std::unique_ptr<impl> impl_;
 
     public:
         cuda_device_data(cuda_runtime* runtime, const void* data, size_t size);
@@ -53,31 +61,25 @@ namespace mem
         cuda_device_data(const cuda_device_data&) = delete;
         cuda_device_data(cuda_device_data&& rhs);
 
-        const void* data() const
-        {
-            return data_;
-        }
-
-        size_t size() const
-        {
-            return size_;
-        }
+        void wait_for_transfer() const;
+         
+        const void* data() const;
+        size_t size() const;
     };
 
     class cuda_pattern
     {
     private:
-        void* bytes_ {nullptr};
-        void* masks_ {nullptr};
-        size_t size_ {0};
-        size_t trimmed_size_ {0};
+        class impl;
+
+        std::unique_ptr<impl> impl_;
 
     public:
         explicit cuda_pattern(cuda_runtime* runtime, const pattern& pattern);
         ~cuda_pattern();
 
         cuda_pattern(const cuda_pattern&) = delete;
-        cuda_pattern(cuda_pattern&&) = delete;
+        cuda_pattern(cuda_pattern&&);
 
         std::vector<size_t> scan_all(const cuda_device_data& data, size_t max_results = 1024) const;
     };
