@@ -25,43 +25,61 @@
 
 namespace mem
 {
-    void set_cuda_device(int device);
-
-    class device_data
+    class cuda_runtime
     {
     private:
-        byte* device_data_ {nullptr};
+        int device_;
+
+    public:
+        explicit cuda_runtime(int device = 0);
+        ~cuda_runtime();
+
+        cuda_runtime(const cuda_runtime&) = delete;
+        cuda_runtime(cuda_runtime&&) = delete;
+
+        void set_device();
+    };
+
+    class cuda_device_data
+    {
+    private:
+        void* data_ {nullptr};
         size_t size_ {0};
 
     public:
-        explicit device_data(const byte* host_data, size_t size);
+        cuda_device_data(cuda_runtime* runtime, const void* data, size_t size);
+        ~cuda_device_data();
 
-        device_data(const device_data&) = delete;
-        device_data(device_data&& rhs);
+        cuda_device_data(const cuda_device_data&) = delete;
+        cuda_device_data(cuda_device_data&& rhs);
 
-        ~device_data();
+        const void* data() const
+        {
+            return data_;
+        }
 
-        const byte* data() const;
-        size_t size() const;
+        size_t size() const
+        {
+            return size_;
+        }
     };
 
     class cuda_pattern
     {
     private:
-        byte* device_bytes_ {nullptr};
-        byte* device_masks_ {nullptr};
+        void* bytes_ {nullptr};
+        void* masks_ {nullptr};
         size_t size_ {0};
         size_t trimmed_size_ {0};
 
     public:
-        explicit cuda_pattern(const pattern& pattern);
-
-        cuda_pattern(const cuda_pattern&) = delete;
-        cuda_pattern(cuda_pattern&& rhs);
-
+        explicit cuda_pattern(cuda_runtime* runtime, const pattern& pattern);
         ~cuda_pattern();
 
-        std::vector<size_t> scan_all(const device_data& data, size_t max_results = 1024) const;
+        cuda_pattern(const cuda_pattern&) = delete;
+        cuda_pattern(cuda_pattern&&) = delete;
+
+        std::vector<size_t> scan_all(const cuda_device_data& data, size_t max_results = 1024) const;
     };
 }
 

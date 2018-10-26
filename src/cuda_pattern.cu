@@ -18,7 +18,6 @@
 */
 
 #include "mem/cuda_pattern.h"
-#include <memory>
 
 #include <stdexcept>
 
@@ -32,56 +31,6 @@ inline void assert_(cudaError_t code, const char *file, int line)
         snprintf(buffer, 1024, "CUDA Check Failed: %s : %s : %i", cudaGetErrorString(code), file, line);
 
         throw std::runtime_error(buffer);
-    }
-}
-
-namespace cuda
-{
-    template <typename T>
-    class device_allocator
-        : public std::allocator<T>
-    {
-    public:
-        T* allocate(size_t n)
-        {
-            void* result = nullptr;
-
-            check(cudaMalloc(&result, n * sizeof(T)));
-
-            return static_cast<T*>(result);
-        }
-
-        void deallocate(T* p, size_t n)
-        {
-            if (p)
-            {
-                cudaFree(p);
-            }
-        }
-    };
-
-    template <typename T>
-    void host_to_device(const T& host_value, T& device_value)
-    {
-        check(cudaMemcpy(&device_value, &host_value, sizeof(T), cudaMemcpyHostToDevice));
-    }
-
-    template <typename T>
-    void host_to_device(const T* host_data, T* device_data, size_t length)
-    {
-        check(cudaMemcpy(device_data, host_data, length * sizeof(T), cudaMemcpyHostToDevice));
-    }
-
-    template <typename T>
-    void device_to_host(const T& device_value, T& host_value)
-    {
-        check(cudaMemcpy(&host_value, &device_value, sizeof(T), cudaMemcpyDeviceToHost));
-    }
-
-    template <typename T>
-    void device_to_host(const T* device_value, T* host_value, size_t length)
-    {
-        check(cudaMemcpy(host_value, device_value, length * sizeof(T), cudaMemcpyDeviceToHost));
     }
 }
 
@@ -146,80 +95,63 @@ namespace mem
         }
     }
 
-    void set_cuda_device(int device)
+    cuda_device_data::cuda_device_data(cuda_runtime* runtime, const void* data, size_t size)
     {
-        check(cudaSetDevice(0));
+        runtime->set_device();
+
+        check(cudaMalloc(&data_, size));
+        check(cudaMemcpy(data_, data, size, cudaMemcpyHostToDevice));
+
+        size_ = size;
     }
 
-    device_data::device_data(const byte* host_data, size_t size)
-        : device_data_(cuda::device_allocator<byte>{}.allocate(size))
-        , size_(size)
+    cuda_device_data::~cuda_device_data()
     {
-        cuda::host_to_device<byte>(host_data, device_data_, size_);
+        check(cudaFree(data_));
     }
 
-    device_data::device_data(device_data&& rhs)
-        : device_data_(rhs.device_data_)
+    cuda_device_data::cuda_device_data(cuda_device_data&& rhs)
+        : data_(rhs.data_)
         , size_(rhs.size_)
     {
-        rhs.device_data_ = nullptr;
+        rhs.data_ = nullptr;
         rhs.size_ = 0;
     }
 
-    device_data::~device_data()
+    cuda_runtime::cuda_runtime(int device)
+        : device_(device)
+    { }
+
+    cuda_runtime::~cuda_runtime() = default;
+
+    void cuda_runtime::set_device()
     {
-        if (device_data_)
-        {
-            cuda::device_allocator<byte>{}.deallocate(device_data_, size_);
-        }
+        check(cudaSetDevice(device_));
     }
 
-    const byte* device_data::data() const
+    cuda_pattern::cuda_pattern(cuda_runtime* runtime, const pattern& pattern)
     {
-        return device_data_;
-    }
+        runtime->set_device();
 
-    size_t device_data::size() const
-    {
-        return size_;
-    }
+        size_t size = pattern.size();
 
-    cuda_pattern::cuda_pattern(const pattern& pattern)
-        : device_bytes_(cuda::device_allocator<byte>{}.allocate(pattern.size()))
-        , device_masks_(cuda::device_allocator<byte>{}.allocate(pattern.size()))
-        , size_(pattern.size())
-        , trimmed_size_(pattern.trimmed_size())
-    {
-        cuda::host_to_device<byte>(pattern.bytes(), device_bytes_, size_);
-        cuda::host_to_device<byte>(pattern.masks(), device_masks_, size_);
-    }
+        check(cudaMalloc(&bytes_, size));
+        check(cudaMalloc(&masks_, size));
 
-    cuda_pattern::cuda_pattern(cuda_pattern&& rhs)
-        : device_bytes_(rhs.device_bytes_)
-        , device_masks_(rhs.device_masks_)
-        , size_(rhs.size_)
-        , trimmed_size_(rhs.trimmed_size_)
-    {
-        rhs.device_bytes_ = nullptr;
-        rhs.device_masks_ = nullptr;
-        rhs.size_ = 0;
-        rhs.trimmed_size_ = 0;
+        check(cudaMemcpy(bytes_, pattern.bytes(), size, cudaMemcpyHostToDevice));
+        check(cudaMemcpy(masks_, pattern.masks(), size, cudaMemcpyHostToDevice));
+
+        size_ = size;
+        trimmed_size_ = pattern.trimmed_size();
     }
 
     cuda_pattern::~cuda_pattern()
     {
-        if (device_bytes_)
-        {
-            cuda::device_allocator<byte>{}.deallocate(device_bytes_, size_);
-        }
-
-        if (device_masks_)
-        {
-            cuda::device_allocator<byte>{}.deallocate(device_masks_, size_);
-        }
+        check(cudaFree(bytes_));
+        check(cudaFree(masks_));
     }
 
-    std::vector<size_t> cuda_pattern::scan_all(const device_data& data, size_t max_results) const
+    std::vector<size_t> cuda_pattern::scan_all(const cuda_device_data& data, size_t max_results) const
     {
         if ((data.size() < size_) || (trimmed_size_ == 0))
         {
@@ -237,26 +169,31 @@ namespace mem
         size_t thread_count  = min(scan_length, max_threads);
         size_t block_count   = min((scan_length + thread_count - 1) / thread_count, max_blocks);
 
-        size_t* device_results      = cuda::device_allocator<size_t>{}.allocate(max_results);
-        size_t* device_result_count = cuda::device_allocator<size_t>{}.allocate(1);
+        size_t* device_results      = nullptr;
+        size_t* device_result_count = nullptr;
 
-        cuda::host_to_device<size_t>(0, *device_result_count);
+        check(cudaMalloc((void**) &device_results, max_results * sizeof(size_t)));
+        check(cudaMalloc((void**) &device_result_count, sizeof(size_t)));
+
+        const size_t zero = 0;
+
+        check(cudaMemcpy(device_result_count, &zero, sizeof(size_t), cudaMemcpyHostToDevice));
 
         internal::scan_kernel<<<(int) block_count, (int) thread_count>>>(
-            data.data(), scan_length,
-            device_bytes_, device_masks_, trimmed_size_,
+            (const byte*) data.data(), scan_length,
+            (const byte*) bytes_, (const byte*) masks_, trimmed_size_,
             device_results, device_result_count, max_results);
 
         size_t result_count = 0;
 
-        cuda::device_to_host<size_t>(*device_result_count, result_count);
+        check(cudaMemcpy(&result_count, device_result_count, sizeof(size_t), cudaMemcpyDeviceToHost));
 
         std::vector<size_t> results(min(result_count, max_results));
 
-        cuda::device_to_host<size_t>(device_results, results.data(), results.size());
+        check(cudaMemcpy(results.data(), device_results, results.size() * sizeof(size_t), cudaMemcpyDeviceToHost));
 
-        cuda::device_allocator<size_t>{}.deallocate(device_results, max_results);
-        cuda::device_allocator<size_t>{}.deallocate(device_result_count, 1);
+        check(cudaFree(device_results));
+        check(cudaFree(device_result_count));
 
         return results;
     }
